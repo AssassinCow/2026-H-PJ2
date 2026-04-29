@@ -1,0 +1,56 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# ===== Virtual environments =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== Editors / IDEs =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
+
+# ===== ML / training artifacts =====
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.h5
+*.npy
+*.npz
+runs/
+checkpoints/
+wandb/
+mlruns/
+logs/
+*.log
+
+# ===== Project-specific =====
+# Local test data dropped in by interviewer (do not commit private test sets)
+NER/English/test.txt
+NER/Chinese/test.txt
+
+# Optional: prediction outputs are kept under version control for grading;
+# uncomment the next two lines if you would rather regenerate them locally.
+# NER/*_result_english.txt
+# NER/*_result_chinese.txt
