@@ -4,25 +4,34 @@ Task 3: Transformer+CRF Named Entity Recognition (optimized)
 Architecture (per language):
 - Word embedding (always)
 - Casing feature embedding (English only — captures Title/UPPER/lower/digit/punct)
-- Character-level CNN (English only — captures suffixes/prefixes like CRF's word[-3:])
+- Character-level CNN (captures English affixes and adds a small sub-token signal for Chinese)
 - Sinusoidal positional encoding
 - Transformer encoder (PyTorch)
-- Hand-written CRF layer (forward algo + Viterbi decoding)
+- Hand-written constrained CRF layer (forward algo + Viterbi decoding)
 
 Key training tricks:
-- Early stopping with patience to avoid wasted compute and overfit
+- Early stopping by validation micro F1 to match the target metric
 - Different dropout / lr-scheduling per language
+- Optional pretrained text embeddings via NER_PRETRAINED_EN / NER_PRETRAINED_ZH
 """
 
 import os
 import sys
 import math
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from collections import Counter, defaultdict
+
+
+def set_seed(seed=42):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 # ============================================================
@@ -121,9 +130,41 @@ def build_tag_map(sentences):
     return tag2idx, idx2tag
 
 
+def load_pretrained_embeddings(model, vocab, path, device):
+    """Load text embeddings when an optional GloVe/fastText-style file is provided."""
+    if not path or not os.path.exists(path):
+        return 0
+
+    expected_dim = model.embedding.weight.size(1)
+    hits = 0
+    seen_ids = set()
+    lower_vocab = defaultdict(list)
+    for vocab_token, token_id in vocab.items():
+        lower_vocab[vocab_token.lower()].append(token_id)
+
+    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line_no, line in enumerate(f):
+            parts = line.rstrip().split()
+            if line_no == 0 and len(parts) == 2 and all(p.isdigit() for p in parts):
+                continue
+            if len(parts) != expected_dim + 1:
+                continue
+            token = parts[0]
+            token_ids = [vocab[token]] if token in vocab else lower_vocab.get(token.lower(), [])
+            token_ids = [token_id for token_id in token_ids if token_id not in seen_ids]
+            if not token_ids:
+                continue
+            vector = torch.tensor([float(x) for x in parts[1:]], dtype=torch.float)
+            for token_id in token_ids:
+                model.embedding.weight.data[token_id] = vector.to(device)
+                seen_ids.add(token_id)
+                hits += 1
+    return hits
+
+
 class NERDataset(Dataset):
     def __init__(self, sentences, vocab, tag2idx, char2idx=None, use_casing=False,
-                 max_word_len=20):
+                 max_word_len=20, word_dropout=0.0):
         self.sentences = sentences
         self.vocab = vocab
         self.tag2idx = tag2idx
@@ -131,6 +172,7 @@ class NERDataset(Dataset):
         self.use_casing = use_casing
         self.use_char = char2idx is not None
         self.max_word_len = max_word_len
+        self.word_dropout = word_dropout
 
     def __len__(self):
         return len(self.sentences)
@@ -138,6 +180,12 @@ class NERDataset(Dataset):
     def __getitem__(self, idx):
         sent = self.sentences[idx]
         token_ids = [self.vocab.get(t, self.vocab['<UNK>']) for t, _ in sent]
+        if self.word_dropout > 0:
+            unk_id = self.vocab['<UNK>']
+            token_ids = [
+                unk_id if token_id > 1 and random.random() < self.word_dropout else token_id
+                for token_id in token_ids
+            ]
         tag_ids = [self.tag2idx[tag] for _, tag in sent]
 
         casing_ids = None
@@ -194,39 +242,110 @@ def make_collate_fn(use_casing=False, use_char=False, max_word_len=20):
 # Hand-written CRF layer
 # ============================================================
 
+def split_tag(tag):
+    if tag == 'O' or '-' not in tag:
+        return 'O', None
+    return tag.split('-', 1)
+
+
+def legal_start(tag, language):
+    prefix, _ = split_tag(tag)
+    if language == 'English':
+        return prefix != 'I'
+    return prefix not in {'M', 'E'}
+
+
+def legal_end(tag, language):
+    prefix, _ = split_tag(tag)
+    if language == 'English':
+        return True
+    return prefix not in {'B', 'M'}
+
+
+def legal_transition(prev_tag, next_tag, language):
+    prev_prefix, prev_type = split_tag(prev_tag)
+    next_prefix, next_type = split_tag(next_tag)
+    if language == 'English':
+        if next_prefix == 'I':
+            return prev_prefix in {'B', 'I'} and prev_type == next_type
+        return True
+
+    if prev_prefix in {'B', 'M'}:
+        return next_prefix in {'M', 'E'} and prev_type == next_type
+    if next_prefix in {'M', 'E'}:
+        return False
+    return True
+
+
+def build_constraint_masks(tag2idx, language, penalty=-10000.0):
+    tags = [None] * len(tag2idx)
+    for tag, idx in tag2idx.items():
+        tags[idx] = tag
+
+    start = torch.zeros(len(tags))
+    end = torch.zeros(len(tags))
+    transitions = torch.zeros(len(tags), len(tags))
+    for i, tag in enumerate(tags):
+        if not legal_start(tag, language):
+            start[i] = penalty
+        if not legal_end(tag, language):
+            end[i] = penalty
+    for prev_idx, prev_tag in enumerate(tags):
+        for next_idx, next_tag in enumerate(tags):
+            if not legal_transition(prev_tag, next_tag, language):
+                transitions[prev_idx, next_idx] = penalty
+    return start, transitions, end
+
+
 class CRF(nn.Module):
     """Linear-chain CRF: forward algorithm + Viterbi decoding (hand-written)."""
 
-    def __init__(self, num_tags):
+    def __init__(self, num_tags, tag2idx=None, constraint_language=None):
         super().__init__()
         self.num_tags = num_tags
         self.transitions = nn.Parameter(torch.randn(num_tags, num_tags) * 0.1)
         self.start_transitions = nn.Parameter(torch.randn(num_tags) * 0.1)
         self.end_transitions = nn.Parameter(torch.randn(num_tags) * 0.1)
+        if tag2idx is not None and constraint_language is not None:
+            start, transitions, end = build_constraint_masks(tag2idx, constraint_language)
+        else:
+            start = torch.zeros(num_tags)
+            transitions = torch.zeros(num_tags, num_tags)
+            end = torch.zeros(num_tags)
+        self.register_buffer('start_constraints', start)
+        self.register_buffer('transition_constraints', transitions)
+        self.register_buffer('end_constraints', end)
 
     def _compute_score(self, emissions, tags, mask):
         batch_size, seq_len, _ = emissions.shape
-        score = self.start_transitions[tags[:, 0]] + emissions[:, 0].gather(1, tags[:, 0].unsqueeze(1)).squeeze(1)
+        score = (
+            self.start_transitions[tags[:, 0]]
+            + self.start_constraints[tags[:, 0]]
+            + emissions[:, 0].gather(1, tags[:, 0].unsqueeze(1)).squeeze(1)
+        )
         for t in range(1, seq_len):
-            trans = self.transitions[tags[:, t - 1], tags[:, t]]
+            trans = (
+                self.transitions[tags[:, t - 1], tags[:, t]]
+                + self.transition_constraints[tags[:, t - 1], tags[:, t]]
+            )
             emit = emissions[:, t].gather(1, tags[:, t].unsqueeze(1)).squeeze(1)
             score += (trans + emit) * mask[:, t].float()
         last_positions = mask.long().sum(dim=1) - 1
         last_tags = tags.gather(1, last_positions.unsqueeze(1)).squeeze(1)
-        score += self.end_transitions[last_tags]
+        score += self.end_transitions[last_tags] + self.end_constraints[last_tags]
         return score
 
     def _compute_log_partition(self, emissions, mask):
         batch_size, seq_len, num_tags = emissions.shape
-        alpha = self.start_transitions.unsqueeze(0) + emissions[:, 0]
+        alpha = self.start_transitions.unsqueeze(0) + self.start_constraints.unsqueeze(0) + emissions[:, 0]
         for t in range(1, seq_len):
             emit = emissions[:, t].unsqueeze(1)
-            trans = self.transitions.unsqueeze(0)
+            trans = self.transitions.unsqueeze(0) + self.transition_constraints.unsqueeze(0)
             scores = alpha.unsqueeze(2) + trans + emit
             new_alpha = torch.logsumexp(scores, dim=1)
             m = mask[:, t].unsqueeze(1).float()
             alpha = new_alpha * m + alpha * (1 - m)
-        alpha = alpha + self.end_transitions.unsqueeze(0)
+        alpha = alpha + self.end_transitions.unsqueeze(0) + self.end_constraints.unsqueeze(0)
         return torch.logsumexp(alpha, dim=1)
 
     def neg_log_likelihood(self, emissions, tags, mask):
@@ -236,16 +355,20 @@ class CRF(nn.Module):
 
     def viterbi_decode(self, emissions, mask):
         batch_size, seq_len, num_tags = emissions.shape
-        viterbi = self.start_transitions.unsqueeze(0) + emissions[:, 0]
+        viterbi = self.start_transitions.unsqueeze(0) + self.start_constraints.unsqueeze(0) + emissions[:, 0]
         backpointers = []
         for t in range(1, seq_len):
-            scores = viterbi.unsqueeze(2) + self.transitions.unsqueeze(0)
+            scores = (
+                viterbi.unsqueeze(2)
+                + self.transitions.unsqueeze(0)
+                + self.transition_constraints.unsqueeze(0)
+            )
             best_scores, best_tags = scores.max(dim=1)
             new_viterbi = best_scores + emissions[:, t]
             m = mask[:, t].unsqueeze(1).float()
             viterbi = new_viterbi * m + viterbi * (1 - m)
             backpointers.append(best_tags)
-        viterbi += self.end_transitions.unsqueeze(0)
+        viterbi += self.end_transitions.unsqueeze(0) + self.end_constraints.unsqueeze(0)
         lengths = mask.long().sum(dim=1)
         _, best_last_tags = viterbi.max(dim=1)
         best_paths = []
@@ -280,13 +403,20 @@ class PositionalEncoding(nn.Module):
 
 
 class CharCNN(nn.Module):
-    """Character-level CNN: per-word character representation via 1D conv + max-pool."""
-    def __init__(self, num_chars, d_char_emb=25, d_char_out=30, kernel_size=3):
+    """Character-level CNN: per-word character representation via multi-kernel conv + max-pool."""
+    def __init__(self, num_chars, d_char_emb=25, d_char_out=60, kernel_sizes=(2, 3, 4)):
         super().__init__()
         self.char_emb = nn.Embedding(num_chars, d_char_emb, padding_idx=0)
-        self.conv = nn.Conv1d(d_char_emb, d_char_out, kernel_size=kernel_size,
-                              padding=kernel_size // 2)
+        base = d_char_out // len(kernel_sizes)
+        channels = [base] * len(kernel_sizes)
+        channels[-1] += d_char_out - sum(channels)
+        self.convs = nn.ModuleList([
+            nn.Conv1d(d_char_emb, out_channels, kernel_size=kernel_size,
+                      padding=kernel_size // 2)
+            for kernel_size, out_channels in zip(kernel_sizes, channels)
+        ])
         self.dropout = nn.Dropout(0.25)
+        self.output_dim = sum(channels)
 
     def forward(self, chars):
         # chars: (batch, seq_len, max_word_len)
@@ -294,8 +424,11 @@ class CharCNN(nn.Module):
         x = self.char_emb(chars.view(-1, w))   # (b*s, w, d_char_emb)
         x = self.dropout(x)
         x = x.transpose(1, 2)                  # (b*s, d_char_emb, w)
-        x = F.relu(self.conv(x))               # (b*s, d_char_out, w)
-        x = x.max(dim=2)[0]                    # (b*s, d_char_out)
+        pieces = []
+        for conv in self.convs:
+            conv_out = F.relu(conv(x))
+            pieces.append(conv_out.max(dim=2)[0])
+        x = torch.cat(pieces, dim=1)
         return x.view(b, s, -1)                # (b, s, d_char_out)
 
 
@@ -304,13 +437,15 @@ class TransformerCRF(nn.Module):
                  dim_feedforward=256, dropout=0.3,
                  # Optional features
                  use_casing=False, num_casings=NUM_CASINGS, d_case=16,
-                 use_char_cnn=False, num_chars=0, d_char_emb=25, d_char_out=30):
+                 use_char_cnn=False, num_chars=0, d_char_emb=25, d_char_out=60,
+                 tag2idx=None, constraint_language=None, embedding_dropout=0.1):
         super().__init__()
         self.use_casing = use_casing
         self.use_char_cnn = use_char_cnn
 
         # Word embedding
         self.embedding = nn.Embedding(vocab_size, d_model, padding_idx=0)
+        self.embedding_dropout = nn.Dropout(embedding_dropout)
 
         # Optional feature components
         feat_dim = d_model
@@ -319,7 +454,7 @@ class TransformerCRF(nn.Module):
             feat_dim += d_case
         if use_char_cnn:
             self.char_cnn = CharCNN(num_chars, d_char_emb, d_char_out)
-            feat_dim += d_char_out
+            feat_dim += self.char_cnn.output_dim
 
         # Project concatenated features back to d_model when needed
         if feat_dim != d_model:
@@ -334,11 +469,11 @@ class TransformerCRF(nn.Module):
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.hidden2tag = nn.Linear(d_model, num_tags)
-        self.crf = CRF(num_tags)
+        self.crf = CRF(num_tags, tag2idx=tag2idx, constraint_language=constraint_language)
         self.dropout = nn.Dropout(dropout)
 
     def _get_emissions(self, tokens, mask, casings=None, chars=None):
-        x = self.embedding(tokens)
+        x = self.embedding_dropout(self.embedding(tokens))
         parts = [x]
         if self.use_casing:
             parts.append(self.case_emb(casings))
@@ -375,24 +510,36 @@ LANG_CONFIG = {
         nhead=4,
         num_layers=2,
         dim_feedforward=256,
-        dropout=0.5,           # higher dropout — English overfits hard
-        epochs=80,
+        dropout=0.45,
+        embedding_dropout=0.2,
+        word_dropout=0.05,
+        d_char_out=72,
+        epochs=100,
         batch_size=64,
-        lr=1e-3,
-        patience=8,            # early-stop after 8 epochs without improvement
+        lr=8e-4,
+        weight_decay=1e-4,
+        patience=10,
+        seed=42,
+        pretrained_env='NER_PRETRAINED_EN',
     ),
     'Chinese': dict(
         use_casing=False,
-        use_char_cnn=False,
+        use_char_cnn=True,
         d_model=128,
         nhead=4,
         num_layers=2,
         dim_feedforward=256,
-        dropout=0.3,
+        dropout=0.35,
+        embedding_dropout=0.1,
+        word_dropout=0.02,
+        d_char_out=48,
         epochs=120,
         batch_size=64,
-        lr=1e-3,
-        patience=15,
+        lr=8e-4,
+        weight_decay=1e-4,
+        patience=18,
+        seed=42,
+        pretrained_env='NER_PRETRAINED_ZH',
     ),
 }
 
@@ -412,8 +559,44 @@ def run_validation(model, val_loader, device):
     return val_loss / max(n, 1)
 
 
+def decode_loader(model, data_loader, device):
+    model.eval()
+    all_preds = []
+    with torch.no_grad():
+        for tokens, tags, mask, casings, chars in data_loader:
+            tokens, mask = tokens.to(device), mask.to(device)
+            casings = casings.to(device) if casings is not None else None
+            chars = chars.to(device) if chars is not None else None
+            paths = model.predict(tokens, mask, casings, chars)
+            all_preds.extend(paths)
+    return all_preds
+
+
+def micro_f1_from_paths(val_sents, all_preds, idx2tag):
+    tp = defaultdict(int); fp = defaultdict(int); fn = defaultdict(int)
+    for sent_idx, sent in enumerate(val_sents):
+        preds = all_preds[sent_idx]
+        for i, (_, gold_tag) in enumerate(sent):
+            pred_tag = idx2tag[preds[i]]
+            if gold_tag == 'O' and pred_tag == 'O':
+                continue
+            if gold_tag == pred_tag:
+                tp[gold_tag] += 1
+            else:
+                if pred_tag != 'O':
+                    fp[pred_tag] += 1
+                if gold_tag != 'O':
+                    fn[gold_tag] += 1
+    total_tp = sum(tp.values()); total_fp = sum(fp.values()); total_fn = sum(fn.values())
+    p = total_tp / (total_tp + total_fp) if total_tp + total_fp > 0 else 0
+    r = total_tp / (total_tp + total_fn) if total_tp + total_fn > 0 else 0
+    f1 = 2 * p * r / (p + r) if p + r > 0 else 0
+    return p, r, f1
+
+
 def train_and_predict(language, data_dir, output_path, device='cpu'):
     cfg = LANG_CONFIG[language]
+    set_seed(cfg.get('seed', 42))
     train_path = os.path.join(data_dir, language, 'train.txt')
     val_path = os.path.join(data_dir, language, 'validation.txt')
 
@@ -433,7 +616,10 @@ def train_and_predict(language, data_dir, output_path, device='cpu'):
     # Datasets / loaders
     use_casing = cfg['use_casing']
     use_char = cfg['use_char_cnn']
-    train_ds = NERDataset(train_sents, vocab, tag2idx, char2idx, use_casing)
+    train_ds = NERDataset(
+        train_sents, vocab, tag2idx, char2idx, use_casing,
+        word_dropout=cfg.get('word_dropout', 0.0),
+    )
     val_ds = NERDataset(val_sents, vocab, tag2idx, char2idx, use_casing)
     collate = make_collate_fn(use_casing=use_casing, use_char=use_char)
     train_loader = DataLoader(train_ds, batch_size=cfg['batch_size'], shuffle=True, collate_fn=collate)
@@ -451,17 +637,26 @@ def train_and_predict(language, data_dir, output_path, device='cpu'):
         use_casing=use_casing,
         use_char_cnn=use_char,
         num_chars=len(char2idx) if char2idx else 0,
+        d_char_out=cfg.get('d_char_out', 60),
+        tag2idx=tag2idx,
+        constraint_language=language,
+        embedding_dropout=cfg.get('embedding_dropout', 0.1),
     ).to(device)
+    pretrained_path = os.environ.get(cfg.get('pretrained_env', ''), '')
+    hits = load_pretrained_embeddings(model, vocab, pretrained_path, device)
+    if pretrained_path:
+        print(f"[{language}] Loaded pretrained embeddings: {hits}/{len(vocab)} tokens from {pretrained_path}")
     n_params = sum(p.numel() for p in model.parameters())
     print(f"[{language}] Model params: {n_params:,}")
 
-    optimizer = optim.Adam(model.parameters(), lr=cfg['lr'])
+    optimizer = optim.AdamW(model.parameters(), lr=cfg['lr'], weight_decay=cfg.get('weight_decay', 0.0))
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3
+        optimizer, mode='max', factor=0.5, patience=3
     )
 
     print(f"[{language}] Training on {device} (epochs<={cfg['epochs']}, patience={cfg['patience']})...")
     best_val_loss = float('inf')
+    best_val_f1 = -1.0
     best_state = None
     no_improve = 0
     best_epoch = 0
@@ -484,12 +679,15 @@ def train_and_predict(language, data_dir, output_path, device='cpu'):
         train_loss = total_loss / n_batches
 
         val_loss = run_validation(model, val_loader, device)
-        scheduler.step(val_loss)
+        val_preds = decode_loader(model, val_loader, device)
+        val_p, val_r, val_f1 = micro_f1_from_paths(val_sents, val_preds, idx2tag)
+        scheduler.step(val_f1)
         cur_lr = optimizer.param_groups[0]['lr']
 
         marker = ""
-        if val_loss < best_val_loss:
+        if val_f1 > best_val_f1 or (val_f1 == best_val_f1 and val_loss < best_val_loss):
             best_val_loss = val_loss
+            best_val_f1 = val_f1
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             best_epoch = epoch
             no_improve = 0
@@ -498,28 +696,23 @@ def train_and_predict(language, data_dir, output_path, device='cpu'):
             no_improve += 1
 
         print(f"  Epoch {epoch:3d}/{cfg['epochs']}  train_loss={train_loss:.4f}  "
-              f"val_loss={val_loss:.4f}  lr={cur_lr:.6f}{marker}")
+              f"val_loss={val_loss:.4f}  val_f1={val_f1:.4f}  "
+              f"val_p={val_p:.4f}  val_r={val_r:.4f}  lr={cur_lr:.6f}{marker}")
 
         if no_improve >= cfg['patience']:
-            print(f"  Early stop at epoch {epoch} (best epoch {best_epoch}, val_loss {best_val_loss:.4f})")
+            print(f"  Early stop at epoch {epoch} "
+                  f"(best epoch {best_epoch}, val_f1 {best_val_f1:.4f}, val_loss {best_val_loss:.4f})")
             break
 
     # Restore best
     model.load_state_dict(best_state)
     model.to(device)
-    print(f"[{language}] Loaded best model from epoch {best_epoch} (val_loss={best_val_loss:.4f})")
+    print(f"[{language}] Loaded best model from epoch {best_epoch} "
+          f"(val_f1={best_val_f1:.4f}, val_loss={best_val_loss:.4f})")
 
     # Predict on validation
     print(f"[{language}] Predicting...")
-    model.eval()
-    all_preds = []
-    with torch.no_grad():
-        for tokens, tags, mask, casings, chars in val_loader:
-            tokens, mask = tokens.to(device), mask.to(device)
-            casings = casings.to(device) if casings is not None else None
-            chars = chars.to(device) if chars is not None else None
-            paths = model.predict(tokens, mask, casings, chars)
-            all_preds.extend(paths)
+    all_preds = decode_loader(model, val_loader, device)
 
     with open(output_path, 'w', encoding='utf-8') as f:
         for sent_idx, sent in enumerate(val_sents):

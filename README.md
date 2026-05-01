@@ -31,7 +31,13 @@
 | ---- | ---- | -------- | ------ |
 | 1 | HMM | 纯 Python 手写，监督估计参数 + Viterbi 解码 | [NER/hmm_ner.py](NER/hmm_ner.py) |
 | 2 | CRF | sklearn-crfsuite，配合人工设计的字/词级特征 | [NER/crf_ner.py](NER/crf_ner.py) |
-| 3 | Transformer+CRF | PyTorch 实现的 Transformer Encoder + 手写 CRF 层；英文额外加入 casing embedding 与 char-CNN | [NER/transformer_crf_ner.py](NER/transformer_crf_ner.py) |
+| 3 | Transformer+CRF | PyTorch Transformer Encoder + 约束 CRF；英文加入 casing embedding 与 char-CNN，中文加入 char-CNN 子字符信号 | [NER/transformer_crf_ner.py](NER/transformer_crf_ner.py) |
+
+## 当前结论
+
+验证集 token-level micro F1 显示，增强后的 CRF 是当前最稳的提交模型：英文 `0.9048`，中文 `0.9519`，均优于 HMM 与 Transformer+CRF。强化后的 Transformer+CRF 英文达到 `0.8892`，已接近旧版 CRF；中文达到 `0.9452`，但仍略低于 CRF。
+
+因此，最终提交建议优先采用 CRF 结果；若继续冲击上限，神经模型下一步应接入预训练词向量或 BERT/RoBERTa 类上下文表示。完整实验表和优化说明见 [NER/README.md](NER/README.md)。
 
 ## 数据格式
 
