@@ -1,7 +1,20 @@
 """
 Task 1: HMM-based Named Entity Recognition
 Hand-written HMM model — no ML frameworks.
-Uses supervised learning to estimate parameters and Viterbi decoding for inference.
+
+Improvements over the baseline HMM:
+- The single per-tag <UNK> bucket is replaced by a feature-based backoff
+  distribution **only when** a token is truly out-of-vocabulary (i.e. it
+  was never seen during training). For tokens that are in the training
+  vocabulary, the model behaves identically to the baseline, so the
+  well-tuned 1e-6 add-k smoothing is preserved.
+    English backoff features: lowercased word, 3-char suffix, 3-char prefix
+                              and word shape (case/digit pattern).
+    Chinese backoff features: coarse character type (CJK / DIGIT / ALPHA /
+                              PUNCT / OTHER).
+- Each backoff distribution is estimated per-tag with add-one smoothing
+  and combined via linear interpolation (log-sum-exp). The interpolation
+  weights are heuristic but documented and only ever applied to OOV tokens.
 """
 
 import os
@@ -37,11 +50,49 @@ def load_data(filepath):
 
 
 # ============================================================
+# Backoff feature helpers
+# ============================================================
+
+def english_shape(word):
+    """Compress the case/digit pattern of a word, e.g. 'Rangarajan' -> 'Aa'."""
+    out = []
+    prev = ''
+    for ch in word:
+        if ch.isdigit():
+            cur = '0'
+        elif ch.isalpha():
+            cur = 'A' if ch.isupper() else 'a'
+        else:
+            cur = ch
+        if cur != prev:
+            out.append(cur)
+            prev = cur
+    return ''.join(out)
+
+
+def chinese_char_type(ch):
+    """Coarse character type used as a backoff cue for Chinese."""
+    if not ch:
+        return 'EMPTY'
+    c = ch[0]
+    if '一' <= c <= '鿿':
+        return 'CJK'
+    if c.isdigit():
+        return 'DIGIT'
+    if c.isalpha():
+        return 'ALPHA'
+    if c in '。，、；：！？「」『』（）《》""''…—·':
+        return 'PUNCT'
+    return 'OTHER'
+
+
+# ============================================================
 # HMM Model
 # ============================================================
 
 class HMM:
-    def __init__(self):
+    def __init__(self, language='English'):
+        self.language = language
         self.states = []          # list of tags
         self.state2idx = {}
         self.vocab = set()
@@ -49,49 +100,84 @@ class HMM:
         # Log probabilities
         self.initial_prob = {}    # state -> log prob
         self.transition_prob = {} # (state_i, state_j) -> log prob
-        self.emission_prob = {}   # (state, token) -> log prob
+        self.emission_prob = {}   # (state, token) -> log prob (seen tokens)
+        self.unk_prob = {}        # state -> log prob (per-state UNK floor)
 
-        # Smoothing parameter
+        # Backoff feature distributions (only used for true OOV tokens).
+        self.backoff_tables = {}  # name -> {(state, feat_val): log prob}
+        self.backoff_unk = {}     # name -> {state: log prob}
+
+        # Word-level smoothing constant (kept identical to the baseline).
         self.smooth = 1e-6
 
+        # Interpolation weights over backoff features. Used only for OOV
+        # tokens, so they are normalized to sum to 1 over the backoff
+        # features (no separate "word" weight).
+        if language == 'English':
+            self.backoff_lambdas = {
+                'lower': 0.45,
+                'suffix': 0.30,
+                'prefix': 0.15,
+                'shape': 0.10,
+            }
+        else:
+            self.backoff_lambdas = {'chartype': 1.0}
+
+    # ------------------------------------------------------------
+    # Feature extraction
+    # ------------------------------------------------------------
+    def _features(self, token):
+        if self.language == 'English':
+            return {
+                'lower': token.lower(),
+                'suffix': token[-3:].lower() if len(token) >= 3 else token.lower(),
+                'prefix': token[:3].lower() if len(token) >= 3 else token.lower(),
+                'shape': english_shape(token),
+            }
+        return {'chartype': chinese_char_type(token)}
+
+    # ------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------
     def train(self, sentences):
-        """Estimate HMM parameters from labeled sentences using MLE with smoothing."""
-        # Count statistics
         initial_count = defaultdict(int)
         transition_count = defaultdict(lambda: defaultdict(int))
         emission_count = defaultdict(lambda: defaultdict(int))
         state_count = defaultdict(int)
 
+        feat_names = list(self.backoff_lambdas.keys())
+        backoff_count = {n: defaultdict(lambda: defaultdict(int)) for n in feat_names}
+        backoff_vocab = {n: set() for n in feat_names}
+
         for sent in sentences:
             if not sent:
                 continue
-            # Initial state
             first_tag = sent[0][1]
             initial_count[first_tag] += 1
-
             for i, (token, tag) in enumerate(sent):
                 state_count[tag] += 1
                 emission_count[tag][token] += 1
                 self.vocab.add(token)
+                feats = self._features(token)
+                for name, value in feats.items():
+                    backoff_count[name][tag][value] += 1
+                    backoff_vocab[name].add(value)
                 if i > 0:
                     prev_tag = sent[i - 1][1]
                     transition_count[prev_tag][tag] += 1
 
-        # Build state list
         self.states = sorted(state_count.keys())
         self.state2idx = {s: i for i, s in enumerate(self.states)}
         num_states = len(self.states)
         num_sents = len(sentences)
         vocab_size = len(self.vocab)
 
-        # Compute log probabilities with add-k smoothing
-        # Initial probabilities
+        # Initial / transition / emission with the baseline 1e-6 smoothing.
         for s in self.states:
             self.initial_prob[s] = math.log(
                 (initial_count[s] + self.smooth) / (num_sents + self.smooth * num_states)
             )
 
-        # Transition probabilities
         for si in self.states:
             total = sum(transition_count[si].values()) + self.smooth * num_states
             for sj in self.states:
@@ -99,46 +185,77 @@ class HMM:
                     (transition_count[si][sj] + self.smooth) / total
                 )
 
-        # Emission probabilities
         for s in self.states:
             total = sum(emission_count[s].values()) + self.smooth * (vocab_size + 1)
             for token in emission_count[s]:
                 self.emission_prob[(s, token)] = math.log(
                     (emission_count[s][token] + self.smooth) / total
                 )
-            # Unknown token probability
-            self.emission_prob[(s, '<UNK>')] = math.log(
-                self.smooth / total
-            )
+            self.unk_prob[s] = math.log(self.smooth / total)
+
+        # Backoff distributions (add-one smoothed); only used for OOV tokens.
+        for name in feat_names:
+            self.backoff_tables[name] = {}
+            self.backoff_unk[name] = {}
+            v_size = len(backoff_vocab[name])
+            for s in self.states:
+                counts = backoff_count[name][s]
+                denom = sum(counts.values()) + (v_size + 1)
+                self.backoff_unk[name][s] = math.log(1.0 / denom)
+                for value, c in counts.items():
+                    self.backoff_tables[name][(s, value)] = math.log(
+                        (c + 1.0) / denom
+                    )
 
         print(f"  States: {num_states}, Vocab: {vocab_size}, Sentences: {num_sents}")
+        print(f"  Backoff features (OOV only): {feat_names} | "
+              f"lambdas: {self.backoff_lambdas}")
 
+    # ------------------------------------------------------------
+    # Emission log-probability.
+    #   - Seen-for-this-state token: original word distribution.
+    #   - Seen-elsewhere token (in vocab but not for this state):
+    #     original per-state UNK floor — same as baseline.
+    #   - True OOV (never seen during training): linear-interpolation
+    #     mixture over backoff feature distributions.
+    # ------------------------------------------------------------
     def _get_emission(self, state, token):
-        """Get emission log probability, handling unknown tokens."""
         key = (state, token)
         if key in self.emission_prob:
             return self.emission_prob[key]
-        return self.emission_prob[(state, '<UNK>')]
+        if token in self.vocab:
+            return self.unk_prob[state]
 
+        feats = self._features(token)
+        log_terms = []
+        for name, value in feats.items():
+            w = self.backoff_lambdas.get(name, 0.0)
+            if w <= 0:
+                continue
+            lp = self.backoff_tables[name].get(
+                (state, value), self.backoff_unk[name][state]
+            )
+            log_terms.append(math.log(w) + lp)
+        if not log_terms:
+            return self.unk_prob[state]
+        m = max(log_terms)
+        return m + math.log(sum(math.exp(t - m) for t in log_terms))
+
+    # ------------------------------------------------------------
+    # Decoding
+    # ------------------------------------------------------------
     def viterbi(self, tokens):
-        """Viterbi decoding to find the most likely state sequence."""
         n = len(tokens)
         if n == 0:
             return []
 
-        num_states = len(self.states)
-
-        # dp[t][s] = log probability of best path ending in state s at time t
-        # backptr[t][s] = best previous state
         dp = [{} for _ in range(n)]
         backptr = [{} for _ in range(n)]
 
-        # Initialization (t=0)
         for s in self.states:
             dp[0][s] = self.initial_prob[s] + self._get_emission(s, tokens[0])
             backptr[0][s] = None
 
-        # Recursion
         for t in range(1, n):
             token = tokens[t]
             for s in self.states:
@@ -153,19 +270,14 @@ class HMM:
                 dp[t][s] = best_score
                 backptr[t][s] = best_prev
 
-        # Termination: find best final state
         best_final = max(self.states, key=lambda s: dp[n - 1][s])
-
-        # Backtrack
         path = [None] * n
         path[n - 1] = best_final
         for t in range(n - 2, -1, -1):
             path[t] = backptr[t + 1][path[t + 1]]
-
         return path
 
     def predict(self, sentences):
-        """Predict tags for a list of sentences."""
         results = []
         for sent in sentences:
             tokens = [t for t, _ in sent]
@@ -179,7 +291,6 @@ class HMM:
 # ============================================================
 
 def train_and_predict(language, data_dir, output_path):
-    """Train HMM and predict on validation set."""
     train_path = os.path.join(data_dir, language, 'train.txt')
     val_path = os.path.join(data_dir, language, 'validation.txt')
 
@@ -189,13 +300,12 @@ def train_and_predict(language, data_dir, output_path):
     print(f"[{language}] Train: {len(train_sents)} sentences, Val: {len(val_sents)} sentences")
 
     print(f"[{language}] Training HMM...")
-    model = HMM()
+    model = HMM(language=language)
     model.train(train_sents)
 
     print(f"[{language}] Predicting (Viterbi decoding)...")
     y_pred = model.predict(val_sents)
 
-    # Write prediction file
     with open(output_path, 'w', encoding='utf-8') as f:
         for sent_idx, sent in enumerate(val_sents):
             preds = y_pred[sent_idx]
@@ -204,9 +314,7 @@ def train_and_predict(language, data_dir, output_path):
             f.write("\n")
     print(f"[{language}] Predictions written to {output_path}")
 
-    # Compute F1 manually (no sklearn)
     metrics = evaluate(language, val_sents, y_pred)
-
     return model, metrics
 
 
@@ -263,7 +371,6 @@ def evaluate(language, val_sents, y_pred):
 
 
 def predict_test(model, language, test_path, output_path):
-    """Predict on test file (for interview)."""
     test_sents = load_data(test_path)
     y_pred = model.predict(test_sents)
     with open(output_path, 'w', encoding='utf-8') as f:
@@ -292,13 +399,11 @@ if __name__ == '__main__':
         model, metrics = train_and_predict(lang, data_dir, output_file)
         summary[lang] = metrics
 
-        # If test.txt exists, predict on it too
         test_path = os.path.join(data_dir, lang, 'test.txt')
         if os.path.exists(test_path):
             test_output = os.path.join(data_dir, f'hmm_test_result_{lang.lower()}.txt')
             predict_test(model, lang, test_path, test_output)
 
-    # Final summary across all languages
     if len(summary) > 1:
         print()
         print("#" * 64)
