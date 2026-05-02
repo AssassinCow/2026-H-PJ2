@@ -19,6 +19,8 @@ ENV/
 # ===== Editors / IDEs =====
 .vscode/
 .idea/
+.claude/
+.codex/
 *.swp
 *.swo
 *~
