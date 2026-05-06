@@ -1,6 +1,11 @@
 """
-Aggregate evaluation: scan all *_result_{english,chinese}.txt files, run check.py on each,
+Aggregate evaluation: scan all per-model prediction files, run check.py on each,
 and print a single comparison table.
+
+Usage:
+  python evaluate_all.py            # validation set (default)
+  python evaluate_all.py val        # validation set
+  python evaluate_all.py test       # test set
 """
 
 import os
@@ -11,17 +16,32 @@ from contextlib import redirect_stdout
 from check import check
 
 
+# Per-split file conventions:
+#   val  : results/<model>/<model>_result_<lang>.txt           vs data/<Lang>/validation.txt
+#   test : results/<model>/<model>_test_result_<lang>.txt      vs data/<Lang>/test.txt
+SPLITS = {
+    'val': {
+        'gold_template': 'data/{Lang}/validation.txt',
+        'pred_suffix': 'result',
+        'label': 'validation set',
+    },
+    'test': {
+        'gold_template': 'data/{Lang}/test.txt',
+        'pred_suffix': 'test_result',
+        'label': 'test set',
+    },
+}
+
+# (display name, results subdir, file prefix). Final pred path is
+# results/<subdir>/<prefix>_<pred_suffix>_<lang>.txt for the chosen split.
 MODELS = [
-    ('HMM',             'results/hmm/hmm_result_{}.txt'),
-    ('CRF',             'results/crf/crf_result_{}.txt'),
-    ('Transformer+CRF', 'results/transformer_crf/transformer_crf_result_{}.txt'),
-    ('Ensemble',        'results/ensemble/ensemble_result_{}.txt'),
+    ('HMM',             'hmm',             'hmm'),
+    ('CRF',             'crf',             'crf'),
+    ('Transformer+CRF', 'transformer_crf', 'transformer_crf'),
+    ('Ensemble',        'ensemble',        'ensemble'),
 ]
 
-LANGUAGES = [
-    ('English', 'data/English/validation.txt'),
-    ('Chinese', 'data/Chinese/validation.txt'),
-]
+LANGUAGES = ['English', 'Chinese']
 
 
 def parse_micro_avg(report_text):
@@ -41,17 +61,40 @@ def parse_micro_avg(report_text):
     return None
 
 
+def parse_split(argv):
+    """Pick split from argv. Accept val/validation/test (case-insensitive)."""
+    if len(argv) <= 1:
+        return 'val'
+    arg = argv[1].strip().lower()
+    if arg in ('val', 'validation', 'dev'):
+        return 'val'
+    if arg == 'test':
+        return 'test'
+    sys.stderr.write(f"unknown split '{argv[1]}'. use 'val' or 'test'.\n")
+    sys.exit(2)
+
+
 def main():
     _SRC = os.path.dirname(os.path.abspath(__file__))
     here = os.path.dirname(_SRC)  # NER/
     os.chdir(here)
 
+    split = parse_split(sys.argv)
+    cfg = SPLITS[split]
+
     rows = []  # (model, language, precision, recall, f1, status)
-    for model_name, file_template in MODELS:
-        for lang, gold_path in LANGUAGES:
-            pred_path = file_template.format(lang.lower())
+    for model_name, subdir, prefix in MODELS:
+        for lang in LANGUAGES:
+            gold_path = cfg['gold_template'].format(Lang=lang)
+            pred_path = os.path.join(
+                'results', subdir,
+                f"{prefix}_{cfg['pred_suffix']}_{lang.lower()}.txt",
+            )
+            if not os.path.exists(gold_path):
+                rows.append((model_name, lang, None, None, None, 'gold-missing'))
+                continue
             if not os.path.exists(pred_path):
-                rows.append((model_name, lang, None, None, None, 'missing'))
+                rows.append((model_name, lang, None, None, None, 'pred-missing'))
                 continue
             buf = io.StringIO()
             with redirect_stdout(buf):
@@ -66,7 +109,7 @@ def main():
     # Pretty-print
     print()
     print("#" * 72)
-    print("#  NER Project — Evaluation Summary (micro avg F1 on validation set)")
+    print(f"#  NER Project — Evaluation Summary (micro avg F1 on {cfg['label']})")
     print("#" * 72)
     print()
     print(f"  {'Model':<18s}  {'Language':<10s}  {'Precision':>10s}  {'Recall':>10s}  {'F1':>10s}")
@@ -80,12 +123,12 @@ def main():
     print()
 
     # Highlight box for each language
-    for lang_name, _ in LANGUAGES:
+    for lang_name in LANGUAGES:
         lang_rows = [r for r in rows if r[1] == lang_name and r[5] == 'ok']
         if not lang_rows:
             continue
         print("+" + "=" * 56 + "+")
-        title = f"  >>> Best on {lang_name}"
+        title = f"  >>> Best on {lang_name} ({cfg['label']})"
         print(f"|{title}" + " " * max(0, 56 - len(title)) + "|")
         print("+" + "-" * 56 + "+")
         best = max(lang_rows, key=lambda r: r[4])

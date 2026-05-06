@@ -19,12 +19,21 @@ import os
 import sys
 import math
 import random
+import time
+
+# Ask PyTorch's CUDA allocator to use expandable segments. Without this, the
+# allocator can fragment its reserved pool over thousands of varying-size
+# (B, T, ...) batches, growing it until it bumps against the 12 GB card limit
+# and stalls. Must be set before `import torch`.
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from collections import Counter, defaultdict
+from tqdm import tqdm
 
 
 def set_seed(seed=42):
@@ -553,7 +562,7 @@ LANG_CONFIG = {
         word_dropout=0.05,
         d_char_out=72,
         epochs=100,
-        batch_size=64,
+        batch_size=48,
         lr=8e-4,
         weight_decay=1e-4,
         patience=10,
@@ -583,7 +592,7 @@ LANG_CONFIG = {
         word_dropout=0.02,
         d_char_out=48,
         epochs=120,
-        batch_size=64,
+        batch_size=32,
         lr=8e-4,
         weight_decay=1e-4,
         patience=18,
@@ -612,12 +621,14 @@ def resolve_pretrained_path(cfg, data_dir):
     return env_path
 
 
-def run_validation(model, val_loader, device):
+def run_validation(model, val_loader, device, desc='val'):
     model.eval()
     val_loss = 0
     n = 0
     with torch.no_grad():
-        for tokens, tags, mask, casings, chars in val_loader:
+        pbar = tqdm(val_loader, desc=desc, leave=False, dynamic_ncols=True,
+                    file=sys.stdout, mininterval=0.5)
+        for tokens, tags, mask, casings, chars in pbar:
             tokens, tags, mask = tokens.to(device), tags.to(device), mask.to(device)
             casings = casings.to(device) if casings is not None else None
             chars = chars.to(device) if chars is not None else None
@@ -627,11 +638,13 @@ def run_validation(model, val_loader, device):
     return val_loss / max(n, 1)
 
 
-def decode_loader(model, data_loader, device):
+def decode_loader(model, data_loader, device, desc='decode'):
     model.eval()
     all_preds = []
     with torch.no_grad():
-        for tokens, tags, mask, casings, chars in data_loader:
+        pbar = tqdm(data_loader, desc=desc, leave=False, dynamic_ncols=True,
+                    file=sys.stdout, mininterval=0.5)
+        for tokens, tags, mask, casings, chars in pbar:
             tokens, mask = tokens.to(device), mask.to(device)
             casings = casings.to(device) if casings is not None else None
             chars = chars.to(device) if chars is not None else None
@@ -705,8 +718,12 @@ def train_and_predict(language, data_dir, output_path, device='cpu'):
         if pretrained_dim == 0:
             print(f"[{language}] WARNING: use_pretrained=True but no readable "
                   f"file found (env={cfg.get('pretrained_env','')}, "
-                  f"default={cfg.get('pretrained_default','')}). "
-                  f"Falling back to use_pretrained=False.")
+                  f"default={cfg.get('pretrained_default','')}).")
+            print(f"[{language}] To enable: run `bash download_pretrained.sh` "
+                  f"in the NER/ directory to fetch the default vectors, "
+                  f"or point {cfg.get('pretrained_env','')} at an existing file. "
+                  f"See README.md (预训练词向量 section) for details.")
+            print(f"[{language}] Falling back to use_pretrained=False for this run.")
             use_pretrained = False
 
     # Model
@@ -755,11 +772,20 @@ def train_and_predict(language, data_dir, output_path, device='cpu'):
     no_improve = 0
     best_epoch = 0
 
+    n_train_batches = len(train_loader)
+    log_every = max(1, n_train_batches // 10)  # ~10 lines per epoch as a fallback
     for epoch in range(1, cfg['epochs'] + 1):
+        if device == 'cuda':
+            torch.cuda.reset_peak_memory_stats()
+        epoch_t0 = time.time()
+        print(f"  Epoch {epoch:3d}/{cfg['epochs']} starting "
+              f"({n_train_batches} train batches)...", flush=True)
         model.train()
         total_loss = 0
         n_batches = 0
-        for tokens, tags, mask, casings, chars in train_loader:
+        pbar = tqdm(train_loader, desc=f"epoch {epoch:3d} train",
+                    leave=False, dynamic_ncols=True, file=sys.stdout, mininterval=0.5)
+        for batch_idx, (tokens, tags, mask, casings, chars) in enumerate(pbar):
             tokens, tags, mask = tokens.to(device), tags.to(device), mask.to(device)
             casings = casings.to(device) if casings is not None else None
             chars = chars.to(device) if chars is not None else None
@@ -770,11 +796,19 @@ def train_and_predict(language, data_dir, output_path, device='cpu'):
             optimizer.step()
             total_loss += loss.item()
             n_batches += 1
+            pbar.set_postfix(loss=f"{loss.item():.3f}")
+            # Always-flushed fallback line in case tqdm output is hidden by the terminal.
+            if (batch_idx + 1) % log_every == 0:
+                print(f"    [train] batch {batch_idx + 1}/{n_train_batches}  "
+                      f"loss={loss.item():.3f}", flush=True)
         train_loss = total_loss / n_batches
+        train_t = time.time() - epoch_t0
 
-        val_loss = run_validation(model, val_loader, device)
-        val_preds = decode_loader(model, val_loader, device)
+        val_t0 = time.time()
+        val_loss = run_validation(model, val_loader, device, desc=f"epoch {epoch:3d} val")
+        val_preds = decode_loader(model, val_loader, device, desc=f"epoch {epoch:3d} decode")
         val_p, val_r, val_f1 = micro_f1_from_paths(val_sents, val_preds, idx2tag)
+        val_t = time.time() - val_t0
         scheduler.step(val_f1)
         cur_lr = optimizer.param_groups[0]['lr']
 
@@ -789,13 +823,22 @@ def train_and_predict(language, data_dir, output_path, device='cpu'):
         else:
             no_improve += 1
 
+        mem_str = ""
+        if device == 'cuda':
+            peak_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
+            mem_str = f"  peak_mem={peak_mb:.0f}MB"
+            torch.cuda.empty_cache()
+
         print(f"  Epoch {epoch:3d}/{cfg['epochs']}  train_loss={train_loss:.4f}  "
               f"val_loss={val_loss:.4f}  val_f1={val_f1:.4f}  "
-              f"val_p={val_p:.4f}  val_r={val_r:.4f}  lr={cur_lr:.6f}{marker}")
+              f"val_p={val_p:.4f}  val_r={val_r:.4f}  lr={cur_lr:.6f}  "
+              f"train_t={train_t:.1f}s  val_t={val_t:.1f}s{mem_str}{marker}",
+              flush=True)
 
         if no_improve >= cfg['patience']:
             print(f"  Early stop at epoch {epoch} "
-                  f"(best epoch {best_epoch}, val_f1 {best_val_f1:.4f}, val_loss {best_val_loss:.4f})")
+                  f"(best epoch {best_epoch}, val_f1 {best_val_f1:.4f}, "
+                  f"val_loss {best_val_loss:.4f})", flush=True)
             break
 
     # Restore best

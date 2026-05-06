@@ -48,9 +48,12 @@ logs/
 *.log
 
 # ===== Project-specific =====
-# Local test data dropped in by interviewer (do not commit private test sets)
+# Official test set has not been released yet — keep all test inputs and any
+# predictions made on them out of git. Test *code* (NER/src/test_*.py) is
+# tracked normally; only the .txt artifacts are ignored.
 NER/data/English/test.txt
 NER/data/Chinese/test.txt
+NER/results/**/*_test_result_*.txt
 
 # Pretrained word vectors (large binaries, regenerate via download_pretrained.sh)
 NER/pretrained/
