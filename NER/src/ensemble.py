@@ -217,22 +217,23 @@ def ensemble(language, model_files, model_labels, weights, val_path, output_path
 # Default weights ≈ each model's validation F1 (baseline numbers from
 # README). Update these to reflect the latest run if needed.
 WEIGHTS = {
-    'English': {'HMM': 0.7432, 'CRF': 0.9048, 'Transformer+CRF': 0.8892},
-    'Chinese': {'HMM': 0.8776, 'CRF': 0.9519, 'Transformer+CRF': 0.9452},
+    'English': {'HMM': 0.8369, 'CRF': 0.9048, 'Transformer+CRF': 0.8983},
+    'Chinese': {'HMM': 0.8777, 'CRF': 0.9519, 'Transformer+CRF': 0.9492},
 }
 
 
 if __name__ == '__main__':
-    data_dir = os.path.dirname(os.path.abspath(__file__))
+    _SRC = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.dirname(_SRC)  # NER/
     languages = ['English', 'Chinese']
     if len(sys.argv) > 1:
         languages = [sys.argv[1]]
 
     for lang in languages:
         files = [
-            os.path.join(data_dir, f'hmm_result_{lang.lower()}.txt'),
-            os.path.join(data_dir, f'crf_result_{lang.lower()}.txt'),
-            os.path.join(data_dir, f'transformer_crf_result_{lang.lower()}.txt'),
+            os.path.join(data_dir, 'results', 'hmm',             f'hmm_result_{lang.lower()}.txt'),
+            os.path.join(data_dir, 'results', 'crf',             f'crf_result_{lang.lower()}.txt'),
+            os.path.join(data_dir, 'results', 'transformer_crf', f'transformer_crf_result_{lang.lower()}.txt'),
         ]
         labels = ['HMM', 'CRF', 'Transformer+CRF']
         missing = [f for f in files if not os.path.exists(f)]
@@ -241,6 +242,7 @@ if __name__ == '__main__':
             continue
         w = WEIGHTS[lang]
         weights = [w[l] for l in labels]
-        out = os.path.join(data_dir, f'ensemble_result_{lang.lower()}.txt')
-        val = os.path.join(data_dir, lang, 'validation.txt')
+        os.makedirs(os.path.join(data_dir, 'results', 'ensemble'), exist_ok=True)
+        out = os.path.join(data_dir, 'results', 'ensemble', f'ensemble_result_{lang.lower()}.txt')
+        val = os.path.join(data_dir, 'data', lang, 'validation.txt')
         ensemble(lang, files, labels, weights, val, out)

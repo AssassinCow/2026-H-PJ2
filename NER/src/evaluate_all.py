@@ -12,14 +12,15 @@ from check import check
 
 
 MODELS = [
-    ('HMM',             'hmm_result_{}.txt'),
-    ('CRF',             'crf_result_{}.txt'),
-    ('Transformer+CRF', 'transformer_crf_result_{}.txt'),
+    ('HMM',             'results/hmm/hmm_result_{}.txt'),
+    ('CRF',             'results/crf/crf_result_{}.txt'),
+    ('Transformer+CRF', 'results/transformer_crf/transformer_crf_result_{}.txt'),
+    ('Ensemble',        'results/ensemble/ensemble_result_{}.txt'),
 ]
 
 LANGUAGES = [
-    ('English', 'English/validation.txt'),
-    ('Chinese', 'Chinese/validation.txt'),
+    ('English', 'data/English/validation.txt'),
+    ('Chinese', 'data/Chinese/validation.txt'),
 ]
 
 
@@ -41,7 +42,8 @@ def parse_micro_avg(report_text):
 
 
 def main():
-    here = os.path.dirname(os.path.abspath(__file__))
+    _SRC = os.path.dirname(os.path.abspath(__file__))
+    here = os.path.dirname(_SRC)  # NER/
     os.chdir(here)
 
     rows = []  # (model, language, precision, recall, f1, status)

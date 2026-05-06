@@ -49,10 +49,15 @@ logs/
 
 # ===== Project-specific =====
 # Local test data dropped in by interviewer (do not commit private test sets)
-NER/English/test.txt
-NER/Chinese/test.txt
+NER/data/English/test.txt
+NER/data/Chinese/test.txt
+
+# Pretrained word vectors (large binaries, regenerate via download_pretrained.sh)
+NER/pretrained/
 
 # Optional: prediction outputs are kept under version control for grading;
-# uncomment the next two lines if you would rather regenerate them locally.
-# NER/*_result_english.txt
-# NER/*_result_chinese.txt
+# uncomment the lines below if you would rather regenerate them locally.
+# NER/results/hmm/
+# NER/results/crf/
+# NER/results/transformer_crf/
+# NER/results/ensemble/

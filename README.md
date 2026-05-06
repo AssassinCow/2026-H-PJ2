@@ -35,9 +35,9 @@
 
 ## 当前结论
 
-验证集 token-level micro F1 显示，增强后的 CRF 是当前最稳的提交模型：英文 `0.9048`，中文 `0.9519`，均优于 HMM 与 Transformer+CRF。强化后的 Transformer+CRF 英文达到 `0.8892`，已接近旧版 CRF；中文达到 `0.9452`，但仍略低于 CRF。
+验证集 token-level micro F1 显示，三模型加权融合取得当前最高分：英文 `0.9059`，中文 `0.9532`。增强后的 CRF 是最强单模型：英文 `0.9048`，中文 `0.9519`；强化后的 Transformer+CRF 接入预训练向量后英文达到 `0.8983`，中文达到 `0.9492`。
 
-因此，最终提交建议优先采用 CRF 结果；若继续冲击上限，神经模型下一步应接入预训练词向量或 BERT/RoBERTa 类上下文表示。完整实验表和优化说明见 [NER/README.md](NER/README.md)。
+因此，若允许提交融合结果，最终建议优先采用 Ensemble；若要求单模型提交，则采用 CRF。完整实验表和优化说明见 [NER/README.md](NER/README.md)。
 
 ## 数据格式
 

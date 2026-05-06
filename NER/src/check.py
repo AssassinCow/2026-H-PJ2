@@ -40,4 +40,4 @@ def check(language, gold_path, my_path):
     return
 
 if __name__ == "__main__":
-    check(language = "Chinese", gold_path="example_data/example_gold_result.txt", my_path="example_data/example_my_result.txt")
+    check(language = "Chinese", gold_path="data/example_data/example_gold_result.txt", my_path="data/example_data/example_my_result.txt")

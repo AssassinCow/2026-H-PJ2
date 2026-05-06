@@ -130,12 +130,14 @@ def build_tag_map(sentences):
     return tag2idx, idx2tag
 
 
-def load_pretrained_embeddings(model, vocab, path, device):
-    """Load text embeddings when an optional GloVe/fastText-style file is provided."""
+def load_pretrained_embeddings(emb_module, vocab, path, device):
+    """Load text embeddings into the given nn.Embedding from a GloVe/fastText-style
+    file. Lines whose dimension does not match emb_module.weight.size(1) are
+    silently skipped. Returns the number of vocab tokens successfully filled."""
     if not path or not os.path.exists(path):
         return 0
 
-    expected_dim = model.embedding.weight.size(1)
+    expected_dim = emb_module.weight.size(1)
     hits = 0
     seen_ids = set()
     lower_vocab = defaultdict(list)
@@ -156,10 +158,28 @@ def load_pretrained_embeddings(model, vocab, path, device):
                 continue
             vector = torch.tensor([float(x) for x in parts[1:]], dtype=torch.float)
             for token_id in token_ids:
-                model.embedding.weight.data[token_id] = vector.to(device)
+                emb_module.weight.data[token_id] = vector.to(device)
                 seen_ids.add(token_id)
                 hits += 1
     return hits
+
+
+def peek_pretrained_dim(path):
+    """Return the embedding dim implied by a GloVe/fastText-style file, or 0 if
+    the file is missing / unreadable."""
+    if not path or not os.path.exists(path):
+        return 0
+    try:
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            first = f.readline().rstrip().split()
+            if len(first) == 2 and all(p.isdigit() for p in first):
+                # fastText-style header "<vocab> <dim>"
+                return int(first[1])
+            if len(first) >= 2:
+                return len(first) - 1
+    except OSError:
+        pass
+    return 0
 
 
 class NERDataset(Dataset):
@@ -438,17 +458,31 @@ class TransformerCRF(nn.Module):
                  # Optional features
                  use_casing=False, num_casings=NUM_CASINGS, d_case=16,
                  use_char_cnn=False, num_chars=0, d_char_emb=25, d_char_out=60,
-                 tag2idx=None, constraint_language=None, embedding_dropout=0.1):
+                 tag2idx=None, constraint_language=None, embedding_dropout=0.1,
+                 use_pretrained=False, pretrained_dim=0):
         super().__init__()
         self.use_casing = use_casing
         self.use_char_cnn = use_char_cnn
+        self.use_pretrained = use_pretrained
 
-        # Word embedding
+        # Learnable 128-d word embedding — the baseline word stream. Kept as-is
+        # so the existing tuned dropouts / char-CNN balance still applies.
         self.embedding = nn.Embedding(vocab_size, d_model, padding_idx=0)
         self.embedding_dropout = nn.Dropout(embedding_dropout)
 
-        # Optional feature components
         feat_dim = d_model
+        if use_pretrained:
+            # Frozen pretrained embedding stream. Concatenated with the
+            # learnable embedding (additive prior, not a replacement); kept
+            # frozen so its semantic prior does not get washed out by
+            # gradient updates. Tokens missing from the pretrained file keep
+            # the zero vector — they fall back to the learnable embedding.
+            assert pretrained_dim > 0, \
+                "use_pretrained=True requires pretrained_dim > 0 (auto-detected from file)"
+            self.pretrained_emb = nn.Embedding(vocab_size, pretrained_dim, padding_idx=0)
+            nn.init.zeros_(self.pretrained_emb.weight)
+            self.pretrained_emb.weight.requires_grad = False
+            feat_dim += pretrained_dim
         if use_casing:
             self.case_emb = nn.Embedding(num_casings, d_case, padding_idx=0)
             feat_dim += d_case
@@ -475,6 +509,10 @@ class TransformerCRF(nn.Module):
     def _get_emissions(self, tokens, mask, casings=None, chars=None):
         x = self.embedding_dropout(self.embedding(tokens))
         parts = [x]
+        if self.use_pretrained:
+            # Same dropout for the pretrained stream so both word streams
+            # are regularized consistently before concatenation.
+            parts.append(self.embedding_dropout(self.pretrained_emb(tokens)))
         if self.use_casing:
             parts.append(self.case_emb(casings))
         if self.use_char_cnn:
@@ -520,7 +558,18 @@ LANG_CONFIG = {
         weight_decay=1e-4,
         patience=10,
         seed=42,
+        # Pretrained-embedding switch.
+        #   use_pretrained=True : a separate frozen pretrained embedding is
+        #     concatenated with the learnable 128-d embedding (additive
+        #     prior; dim auto-detected from the file). File search priority:
+        #       1) env var NER_PRETRAINED_EN (absolute path), then
+        #       2) default file <NER dir>/pretrained/glove.6B.300d.txt.
+        #     If no file is found at runtime, the toggle silently falls back
+        #     to False with a printed WARNING.
+        #   use_pretrained=False: 128-d learnable embedding only (baseline).
+        use_pretrained=True,
         pretrained_env='NER_PRETRAINED_EN',
+        pretrained_default='pretrained/glove.6B.300d.txt',
     ),
     'Chinese': dict(
         use_casing=False,
@@ -539,9 +588,28 @@ LANG_CONFIG = {
         weight_decay=1e-4,
         patience=18,
         seed=42,
+        use_pretrained=True,
         pretrained_env='NER_PRETRAINED_ZH',
+        pretrained_default='pretrained/cc.zh.300.char.vec',
     ),
 }
+
+
+def resolve_pretrained_path(cfg, data_dir):
+    """Pick the pretrained-vector file for this language: env var first, then
+    the configured default file under the NER directory. Returns '' if none
+    exists."""
+    env_path = os.environ.get(cfg.get('pretrained_env', ''), '').strip()
+    if env_path and os.path.exists(env_path):
+        return env_path
+    default_rel = cfg.get('pretrained_default', '')
+    if default_rel:
+        candidate = os.path.join(data_dir, default_rel)
+        if os.path.exists(candidate):
+            return candidate
+    # If env var was set to something non-existent, surface that intent
+    # back to the caller; otherwise return empty (silently disabled).
+    return env_path
 
 
 def run_validation(model, val_loader, device):
@@ -597,8 +665,8 @@ def micro_f1_from_paths(val_sents, all_preds, idx2tag):
 def train_and_predict(language, data_dir, output_path, device='cpu'):
     cfg = LANG_CONFIG[language]
     set_seed(cfg.get('seed', 42))
-    train_path = os.path.join(data_dir, language, 'train.txt')
-    val_path = os.path.join(data_dir, language, 'validation.txt')
+    train_path = os.path.join(data_dir, 'data', language, 'train.txt')
+    val_path = os.path.join(data_dir, 'data', language, 'validation.txt')
 
     print(f"[{language}] Loading data...")
     train_sents = load_data(train_path)
@@ -625,6 +693,22 @@ def train_and_predict(language, data_dir, output_path, device='cpu'):
     train_loader = DataLoader(train_ds, batch_size=cfg['batch_size'], shuffle=True, collate_fn=collate)
     val_loader = DataLoader(val_ds, batch_size=cfg['batch_size'], shuffle=False, collate_fn=collate)
 
+    # Resolve the pretrained-embedding switch. When ON, locate a file and
+    # auto-detect its dimension; if no usable file is found, fall back to OFF
+    # with a warning so training still proceeds.
+    use_pretrained = bool(cfg.get('use_pretrained', False))
+    pretrained_path = ''
+    pretrained_dim = 0
+    if use_pretrained:
+        pretrained_path = resolve_pretrained_path(cfg, data_dir)
+        pretrained_dim = peek_pretrained_dim(pretrained_path)
+        if pretrained_dim == 0:
+            print(f"[{language}] WARNING: use_pretrained=True but no readable "
+                  f"file found (env={cfg.get('pretrained_env','')}, "
+                  f"default={cfg.get('pretrained_default','')}). "
+                  f"Falling back to use_pretrained=False.")
+            use_pretrained = False
+
     # Model
     model = TransformerCRF(
         vocab_size=len(vocab),
@@ -641,13 +725,23 @@ def train_and_predict(language, data_dir, output_path, device='cpu'):
         tag2idx=tag2idx,
         constraint_language=language,
         embedding_dropout=cfg.get('embedding_dropout', 0.1),
+        use_pretrained=use_pretrained,
+        pretrained_dim=pretrained_dim,
     ).to(device)
-    pretrained_path = os.environ.get(cfg.get('pretrained_env', ''), '')
-    hits = load_pretrained_embeddings(model, vocab, pretrained_path, device)
-    if pretrained_path:
-        print(f"[{language}] Loaded pretrained embeddings: {hits}/{len(vocab)} tokens from {pretrained_path}")
+    if use_pretrained:
+        hits = load_pretrained_embeddings(
+            model.pretrained_emb, vocab, pretrained_path, device
+        )
+        coverage = hits / max(1, len(vocab))
+        print(f"[{language}] Pretrained embeddings (concat, frozen): "
+              f"dim={pretrained_dim}, hits={hits}/{len(vocab)} "
+              f"({coverage:.1%}), file={pretrained_path}")
+    else:
+        print(f"[{language}] Pretrained embeddings: OFF "
+              f"(use_pretrained=False or no file available)")
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"[{language}] Model params: {n_params:,}")
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[{language}] Model params: {n_params:,}  (trainable: {n_trainable:,})")
 
     optimizer = optim.AdamW(model.parameters(), lr=cfg['lr'], weight_decay=cfg.get('weight_decay', 0.0))
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -709,6 +803,34 @@ def train_and_predict(language, data_dir, output_path, device='cpu'):
     model.to(device)
     print(f"[{language}] Loaded best model from epoch {best_epoch} "
           f"(val_f1={best_val_f1:.4f}, val_loss={best_val_loss:.4f})")
+
+    ckpt_path = os.path.join(os.path.dirname(output_path),
+                             f'transformer_crf_checkpoint_{language.lower()}.pt')
+    torch.save({
+        'model_state_dict': best_state,
+        'vocab': vocab,
+        'tag2idx': tag2idx,
+        'idx2tag': idx2tag,
+        'char2idx': char2idx,
+        'language': language,
+        'model_config': dict(
+            vocab_size=len(vocab),
+            num_tags=len(tag2idx),
+            d_model=cfg['d_model'],
+            nhead=cfg['nhead'],
+            num_layers=cfg['num_layers'],
+            dim_feedforward=cfg['dim_feedforward'],
+            dropout=cfg['dropout'],
+            use_casing=use_casing,
+            use_char_cnn=use_char,
+            num_chars=len(char2idx) if char2idx else 0,
+            d_char_out=cfg.get('d_char_out', 60),
+            embedding_dropout=cfg.get('embedding_dropout', 0.1),
+            use_pretrained=use_pretrained,
+            pretrained_dim=pretrained_dim,
+        ),
+    }, ckpt_path)
+    print(f"[{language}] Checkpoint saved to {ckpt_path}")
 
     # Predict on validation
     print(f"[{language}] Predicting...")
@@ -809,7 +931,8 @@ def predict_test(model, vocab, tag2idx, idx2tag, char2idx, language, test_path,
 # ============================================================
 
 if __name__ == '__main__':
-    data_dir = os.path.dirname(os.path.abspath(__file__))
+    _SRC = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.dirname(_SRC)  # NER/
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Device: {device}")
 
@@ -819,16 +942,13 @@ if __name__ == '__main__':
 
     summary = {}
     for lang in languages:
-        output_file = os.path.join(data_dir, f'transformer_crf_result_{lang.lower()}.txt')
+        out_dir = os.path.join(data_dir, 'results', 'transformer_crf')
+        os.makedirs(out_dir, exist_ok=True)
+        output_file = os.path.join(out_dir, f'transformer_crf_result_{lang.lower()}.txt')
         model, vocab, tag2idx, idx2tag, char2idx, metrics = train_and_predict(
             lang, data_dir, output_file, device=device
         )
         summary[lang] = metrics
-
-        test_path = os.path.join(data_dir, lang, 'test.txt')
-        if os.path.exists(test_path):
-            test_output = os.path.join(data_dir, f'transformer_crf_test_result_{lang.lower()}.txt')
-            predict_test(model, vocab, tag2idx, idx2tag, char2idx, lang, test_path, test_output, device)
 
     if len(summary) > 1:
         print()

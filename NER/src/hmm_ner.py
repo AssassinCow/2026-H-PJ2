@@ -20,6 +20,7 @@ Improvements over the baseline HMM:
 import os
 import sys
 import math
+import pickle
 from collections import defaultdict
 
 
@@ -291,8 +292,8 @@ class HMM:
 # ============================================================
 
 def train_and_predict(language, data_dir, output_path):
-    train_path = os.path.join(data_dir, language, 'train.txt')
-    val_path = os.path.join(data_dir, language, 'validation.txt')
+    train_path = os.path.join(data_dir, 'data', language, 'train.txt')
+    val_path = os.path.join(data_dir, 'data', language, 'validation.txt')
 
     print(f"[{language}] Loading data...")
     train_sents = load_data(train_path)
@@ -302,6 +303,11 @@ def train_and_predict(language, data_dir, output_path):
     print(f"[{language}] Training HMM...")
     model = HMM(language=language)
     model.train(train_sents)
+
+    model_path = os.path.join(os.path.dirname(output_path), f'hmm_model_{language.lower()}.pkl')
+    with open(model_path, 'wb') as f:
+        pickle.dump(model, f)
+    print(f"[{language}] Model saved to {model_path}")
 
     print(f"[{language}] Predicting (Viterbi decoding)...")
     y_pred = model.predict(val_sents)
@@ -387,7 +393,8 @@ def predict_test(model, language, test_path, output_path):
 # ============================================================
 
 if __name__ == '__main__':
-    data_dir = os.path.dirname(os.path.abspath(__file__))
+    _SRC = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.dirname(_SRC)  # NER/
 
     languages = ['English', 'Chinese']
     if len(sys.argv) > 1:
@@ -395,14 +402,11 @@ if __name__ == '__main__':
 
     summary = {}
     for lang in languages:
-        output_file = os.path.join(data_dir, f'hmm_result_{lang.lower()}.txt')
+        out_dir = os.path.join(data_dir, 'results', 'hmm')
+        os.makedirs(out_dir, exist_ok=True)
+        output_file = os.path.join(out_dir, f'hmm_result_{lang.lower()}.txt')
         model, metrics = train_and_predict(lang, data_dir, output_file)
         summary[lang] = metrics
-
-        test_path = os.path.join(data_dir, lang, 'test.txt')
-        if os.path.exists(test_path):
-            test_output = os.path.join(data_dir, f'hmm_test_result_{lang.lower()}.txt')
-            predict_test(model, lang, test_path, test_output)
 
     if len(summary) > 1:
         print()

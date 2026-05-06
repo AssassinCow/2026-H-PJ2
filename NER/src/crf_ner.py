@@ -6,6 +6,7 @@ Uses sklearn-crfsuite for sequence labeling on both Chinese and English NER data
 import os
 import re
 import sys
+import pickle
 import unicodedata
 import warnings
 warnings.filterwarnings("ignore")
@@ -337,8 +338,8 @@ CRF_CONFIG = {
 
 def train_and_predict(language, data_dir, output_path):
     """Train CRF on training set and predict on validation set."""
-    train_path = os.path.join(data_dir, language, 'train.txt')
-    val_path = os.path.join(data_dir, language, 'validation.txt')
+    train_path = os.path.join(data_dir, 'data', language, 'train.txt')
+    val_path = os.path.join(data_dir, 'data', language, 'validation.txt')
 
     print(f"[{language}] Loading data...")
     train_sents = load_data(train_path)
@@ -362,6 +363,11 @@ def train_and_predict(language, data_dir, output_path):
         verbose=False,
     )
     crf.fit(X_train, y_train)
+
+    model_path = os.path.join(os.path.dirname(output_path), f'crf_model_{language.lower()}.pkl')
+    with open(model_path, 'wb') as f:
+        pickle.dump(crf, f)
+    print(f"[{language}] Model saved to {model_path}")
 
     print(f"[{language}] Predicting...")
     y_pred = crf.predict(X_val)
@@ -445,7 +451,8 @@ def predict_test(crf, language, test_path, output_path):
 # ============================================================
 
 if __name__ == '__main__':
-    data_dir = os.path.dirname(os.path.abspath(__file__))
+    _SRC = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.dirname(_SRC)  # NER/
 
     # Default: run both languages
     languages = ['English', 'Chinese']
@@ -454,15 +461,11 @@ if __name__ == '__main__':
 
     summary = {}
     for lang in languages:
-        output_file = os.path.join(data_dir, f'crf_result_{lang.lower()}.txt')
+        out_dir = os.path.join(data_dir, 'results', 'crf')
+        os.makedirs(out_dir, exist_ok=True)
+        output_file = os.path.join(out_dir, f'crf_result_{lang.lower()}.txt')
         model, metrics = train_and_predict(lang, data_dir, output_file)
         summary[lang] = metrics
-
-        # If test.txt exists, also predict on it
-        test_path = os.path.join(data_dir, lang, 'test.txt')
-        if os.path.exists(test_path):
-            test_output = os.path.join(data_dir, f'crf_test_result_{lang.lower()}.txt')
-            predict_test(model, lang, test_path, test_output)
 
     if len(summary) > 1:
         print()
