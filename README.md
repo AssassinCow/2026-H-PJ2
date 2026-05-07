@@ -13,6 +13,7 @@
 ├── NER.rar                         # 原始数据/代码骨架压缩包（本地保留，已 gitignore）
 └── NER/                            # 主代码目录（详见 NER/README.md）
     ├── README.md                   # 环境配置 / 各任务运行命令 / 评测结果
+    ├── requirements.txt            # Python 依赖列表
     ├── download_pretrained.sh      # GloVe / fastText 预训练词向量下载脚本
     ├── template_for_crf.utf8       # CRF++ 风格特征模板（参考用）
     ├── data/                       # 数据集
@@ -32,7 +33,7 @@
     └── results/                    # 各模型权重 + 验证集预测（test 预测已 gitignore）
         ├── hmm/                    # hmm_model_{lang}.pkl + hmm_result_{lang}.txt
         ├── crf/                    # crf_model_{lang}.pkl  + crf_result_{lang}.txt
-        ├── transformer_crf/        # transformer_crf_checkpoint_{lang}.pt（已 gitignore）+ 预测
+        ├── transformer_crf/        # transformer_crf_checkpoint_{lang}.pt + 预测
         └── ensemble/               # ensemble_result_{lang}.txt
 ```
 
@@ -50,9 +51,11 @@
 验证集 token-level micro F1：
 
 - 英文最高分来自三模型融合 Ensemble `0.9065`，单模型最优 CRF `0.9048` 紧随其后；增强后的 Transformer+CRF（接入 GloVe-300d 后）`0.8944`。
-- 中文最高分首次由单模型 Transformer+CRF 取得 `0.9531`（拼接 fastText 单字向量），与 Ensemble `0.9529` 几乎贴着，CRF `0.9519`。
+- 中文最高分首次由单模型 Transformer+CRF 取得 `0.9531`（拼接 fastText 单字向量），与 Ensemble `0.9530` 几乎贴着，CRF `0.9519`。
 
-提交策略：英文优先 Ensemble；中文优先 Transformer+CRF（也可直接选 Ensemble，差距 `0.0002`）。若要求单模型一致提交，CRF 在两个语言上都是稳健次选。完整实验表（含测试集）和优化说明见 [NER/README.md](NER/README.md)。
+测试集上偏置切换：Transformer+CRF 在英文反超（F1 `0.8464`），CRF 在中文称王（F1 `0.9558`）。预训练向量贡献由 ablation 单独量化（详见 [NER/README.md](NER/README.md) 的"Ablation：关闭预训练词向量"小节）。
+
+提交策略：英文优先 Ensemble；中文优先 Transformer+CRF（也可直接选 Ensemble，差距约 `0.0001`）。若要求单模型一致提交，CRF 在两个语言上都是稳健次选。完整实验表（含测试集与 ablation）和优化说明见 [NER/README.md](NER/README.md)。
 
 ## 数据格式
 
@@ -71,4 +74,4 @@
 
 ## 测试集复现
 
-正式 `test.txt` 公布后，放入 `NER/data/English/` 或 `NER/data/Chinese/` 目录，运行各 `src/test_*.py` 加载已保存的权重直接预测（**无需重训**），结果写入 `NER/results/<model>/<model>_test_result_<lang>.txt`，再用 `python src/evaluate_all.py test` 一键汇总评测。详见 [NER/README.md](NER/README.md) 的"测试"与"一键汇总评测"小节。
+正式 `test.txt` 公布后，放入 `NER/data/English/` 或 `NER/data/Chinese/` 目录，运行各 `src/test_*.py` 加载已保存的权重直接预测（**无需重训**），结果写入 `NER/results/<model>/<model>_test_result_<lang>.txt`，再用 `python src/evaluate_all.py test` 统一汇总评测。详见 [NER/README.md](NER/README.md) 的"测试"与"评测"小节。

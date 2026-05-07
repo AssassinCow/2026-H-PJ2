@@ -26,7 +26,7 @@ echo "Downloading into: $DEST_DIR"
 echo
 
 # ----------------------------------------------------------------------
-# English: GloVe-100
+# English: GloVe-300
 # ----------------------------------------------------------------------
 GLOVE_FILE="glove.6B.300d.txt"
 GLOVE_ZIP="glove.6B.zip"

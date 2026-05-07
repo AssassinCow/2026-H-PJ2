@@ -214,11 +214,10 @@ def ensemble(language, model_files, model_labels, weights, val_path, output_path
 # Main
 # ------------------------------------------------------------
 
-# Default weights ≈ each model's validation F1 (baseline numbers from
-# README). Update these to reflect the latest run if needed.
+# Default weights: latest validation micro F1 from README.
 WEIGHTS = {
-    'English': {'HMM': 0.8369, 'CRF': 0.9048, 'Transformer+CRF': 0.8983},
-    'Chinese': {'HMM': 0.8777, 'CRF': 0.9519, 'Transformer+CRF': 0.9492},
+    'English': {'HMM': 0.8369, 'CRF': 0.9048, 'Transformer+CRF': 0.8944},
+    'Chinese': {'HMM': 0.8777, 'CRF': 0.9519, 'Transformer+CRF': 0.9531},
 }
 
 

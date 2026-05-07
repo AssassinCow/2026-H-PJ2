@@ -47,6 +47,10 @@ mlruns/
 logs/
 *.log
 
+# Keep the submitted Transformer+CRF checkpoints trackable so the test scripts
+# can run without retraining after a fresh clone.
+!NER/results/transformer_crf/transformer_crf_checkpoint_*.pt
+
 # ===== Project-specific =====
 # Official test set has not been released yet — keep all test inputs and any
 # predictions made on them out of git. Test *code* (NER/src/test_*.py) is
