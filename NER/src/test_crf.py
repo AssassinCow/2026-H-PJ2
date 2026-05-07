@@ -7,11 +7,11 @@ Usage:
     python test_crf.py Chinese
 
 Prerequisites:
-    Run python crf_ner.py first to train and save the model weights.
-    Saved model: crf_results/crf_model_{lang}.pkl
+    Run python src/crf_ner.py first to train and save the model weights.
+    Saved model: results/crf/crf_model_{lang}.pkl
 
-Input:  English/test.txt  or  Chinese/test.txt
-Output: crf_results/crf_test_result_{lang}.txt
+Input:  data/{English,Chinese}/test.txt
+Output: results/crf/crf_test_result_{lang}.txt
 """
 
 import os

@@ -7,11 +7,11 @@ Usage:
     python test_hmm.py Chinese
 
 Prerequisites:
-    Run python hmm_ner.py first to train and save the model weights.
-    Saved model: hmm_results/hmm_model_{lang}.pkl
+    Run python src/hmm_ner.py first to train and save the model weights.
+    Saved model: results/hmm/hmm_model_{lang}.pkl
 
-Input:  English/test.txt  or  Chinese/test.txt
-Output: hmm_results/hmm_test_result_{lang}.txt
+Input:  data/{English,Chinese}/test.txt
+Output: results/hmm/hmm_test_result_{lang}.txt
 """
 
 import os

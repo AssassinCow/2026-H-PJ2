@@ -7,11 +7,11 @@ Usage:
     python test_transformer_crf.py Chinese
 
 Prerequisites:
-    Run python transformer_crf_ner.py first to train and save the checkpoint.
-    Saved checkpoint: transformer_crf_results/transformer_crf_checkpoint_{lang}.pt
+    Run python src/transformer_crf_ner.py first to train and save the checkpoint.
+    Saved checkpoint: results/transformer_crf/transformer_crf_checkpoint_{lang}.pt
 
-Input:  English/test.txt  or  Chinese/test.txt
-Output: transformer_crf_results/transformer_crf_test_result_{lang}.txt
+Input:  data/{English,Chinese}/test.txt
+Output: results/transformer_crf/transformer_crf_test_result_{lang}.txt
 """
 
 import os

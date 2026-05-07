@@ -12,7 +12,10 @@ Architecture (per language):
 Key training tricks:
 - Early stopping by validation micro F1 to match the target metric
 - Different dropout / lr-scheduling per language
-- Optional pretrained text embeddings via NER_PRETRAINED_EN / NER_PRETRAINED_ZH
+- Pretrained text embeddings ON by default (frozen, concatenated with the
+  learnable 128-d embedding). Files are looked up via NER_PRETRAINED_EN /
+  NER_PRETRAINED_ZH first, then default paths under NER/pretrained/. If no
+  file is found we warn and fall back to a learnable-only embedding.
 """
 
 import os

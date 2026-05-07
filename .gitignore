@@ -58,6 +58,10 @@ NER/results/**/*_test_result_*.txt
 # Pretrained word vectors (large binaries, regenerate via download_pretrained.sh)
 NER/pretrained/
 
+# Source archive shipped with the original project bundle — redundant once the
+# code lives in git.
+NER.rar
+
 # Optional: prediction outputs are kept under version control for grading;
 # uncomment the lines below if you would rather regenerate them locally.
 # NER/results/hmm/
