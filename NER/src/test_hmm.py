@@ -46,7 +46,7 @@ def main():
         predict_test(model, lang, test_path, out_path)
         print(f"[{lang}] Done. Predictions written to {out_path}")
         print(f"[{lang}] Evaluate all test predictions with:")
-        print("  cd NER/src && python evaluate_all.py test")
+        print("  python src/evaluate_all.py test")
 
 
 if __name__ == '__main__':

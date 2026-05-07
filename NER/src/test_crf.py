@@ -19,6 +19,7 @@ import sys
 import pickle
 
 from crf_ner import load_data, sent2features, sent2tokens, repair_sequence
+from io_utils import write_predictions_like_input
 
 
 def predict_test(crf, language, test_path, output_path):
@@ -27,13 +28,7 @@ def predict_test(crf, language, test_path, output_path):
     y_pred = crf.predict(X_test)
     y_pred = [repair_sequence(seq, language) for seq in y_pred]
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for sent, preds in zip(test_sents, y_pred):
-            tokens = sent2tokens(sent)
-            for token, tag in zip(tokens, preds):
-                f.write(f"{token} {tag}\n")
-            f.write("\n")
+    write_predictions_like_input(test_path, output_path, y_pred)
     print(f"[{language}] Test predictions written to {output_path}")
 
 
@@ -62,7 +57,7 @@ def main():
         predict_test(crf, lang, test_path, out_path)
         print(f"[{lang}] Done. Predictions written to {out_path}")
         print(f"[{lang}] Evaluate all test predictions with:")
-        print("  cd NER/src && python evaluate_all.py test")
+        print("  python src/evaluate_all.py test")
 
 
 if __name__ == '__main__':

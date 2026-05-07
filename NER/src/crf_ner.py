@@ -14,6 +14,8 @@ warnings.filterwarnings("ignore")
 import sklearn_crfsuite
 from sklearn_crfsuite import metrics as crf_metrics
 
+from io_utils import write_predictions_like_input
+
 
 # ============================================================
 # Data loading
@@ -374,14 +376,7 @@ def train_and_predict(language, data_dir, output_path):
     y_pred = [repair_sequence(seq, language) for seq in y_pred]
 
     # Write prediction file in the required format
-    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for sent_idx, sent in enumerate(val_sents):
-            tokens = sent2tokens(sent)
-            preds = y_pred[sent_idx]
-            for token, pred_tag in zip(tokens, preds):
-                f.write(f"{token} {pred_tag}\n")
-            f.write("\n")
+    write_predictions_like_input(val_path, output_path, y_pred)
 
     print(f"[{language}] Predictions written to {output_path}")
 
@@ -436,13 +431,7 @@ def predict_test(crf, language, test_path, output_path):
     y_pred = crf.predict(X_test)
     y_pred = [repair_sequence(seq, language) for seq in y_pred]
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for sent_idx, sent in enumerate(test_sents):
-            tokens = sent2tokens(sent)
-            preds = y_pred[sent_idx]
-            for token, pred_tag in zip(tokens, preds):
-                f.write(f"{token} {pred_tag}\n")
-            f.write("\n")
+    write_predictions_like_input(test_path, output_path, y_pred)
     print(f"[{language}] Test predictions written to {output_path}")
 
 

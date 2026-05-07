@@ -27,6 +27,7 @@ from transformer_crf_ner import (
     load_data,
     decode_loader,
 )
+from io_utils import write_predictions_like_input
 
 
 def predict_from_checkpoint(ckpt_path, test_path, output_path, device):
@@ -69,13 +70,9 @@ def predict_from_checkpoint(ckpt_path, test_path, output_path, device):
 
     all_preds = decode_loader(model, test_loader, device)
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for sent_idx, sent in enumerate(test_sents):
-            preds = all_preds[sent_idx]
-            for i, (token, _) in enumerate(sent):
-                f.write(f"{token} {idx2tag[preds[i]]}\n")
-            f.write("\n")
+    write_predictions_like_input(
+        test_path, output_path, all_preds, tag_fn=lambda idx: idx2tag[idx]
+    )
     print(f"[{language}] Test predictions written to {output_path}")
 
 
@@ -104,7 +101,7 @@ def main():
         predict_from_checkpoint(ckpt_path, test_path, out_path, device)
         print(f"[{lang}] Done.")
         print(f"[{lang}] Evaluate all test predictions with:")
-        print("  cd NER/src && python evaluate_all.py test")
+        print("  python src/evaluate_all.py test")
 
 
 if __name__ == '__main__':

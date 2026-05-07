@@ -38,6 +38,8 @@ from torch.utils.data import Dataset, DataLoader
 from collections import Counter, defaultdict
 from tqdm import tqdm
 
+from io_utils import write_predictions_like_input
+
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -882,13 +884,9 @@ def train_and_predict(language, data_dir, output_path, device='cpu'):
     print(f"[{language}] Predicting...")
     all_preds = decode_loader(model, val_loader, device)
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for sent_idx, sent in enumerate(val_sents):
-            preds = all_preds[sent_idx]
-            for i, (token, _) in enumerate(sent):
-                pred_tag = idx2tag[preds[i]]
-                f.write(f"{token} {pred_tag}\n")
-            f.write("\n")
+    write_predictions_like_input(
+        val_path, output_path, all_preds, tag_fn=lambda idx: idx2tag[idx]
+    )
     print(f"[{language}] Predictions written to {output_path}")
 
     metrics = evaluate(language, val_sents, all_preds, idx2tag)
@@ -962,13 +960,9 @@ def predict_test(model, vocab, tag2idx, idx2tag, char2idx, language, test_path,
             paths = model.predict(tokens, mask, casings, chars)
             all_preds.extend(paths)
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for sent_idx, sent in enumerate(test_sents):
-            preds = all_preds[sent_idx]
-            for i, (token, _) in enumerate(sent):
-                pred_tag = idx2tag[preds[i]]
-                f.write(f"{token} {pred_tag}\n")
-            f.write("\n")
+    write_predictions_like_input(
+        test_path, output_path, all_preds, tag_fn=lambda idx: idx2tag[idx]
+    )
     print(f"[{language}] Test predictions written to {output_path}")
 
 

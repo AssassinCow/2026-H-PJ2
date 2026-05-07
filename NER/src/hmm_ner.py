@@ -23,6 +23,8 @@ import math
 import pickle
 from collections import defaultdict
 
+from io_utils import write_predictions_like_input
+
 
 # ============================================================
 # Data loading
@@ -312,12 +314,7 @@ def train_and_predict(language, data_dir, output_path):
     print(f"[{language}] Predicting (Viterbi decoding)...")
     y_pred = model.predict(val_sents)
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for sent_idx, sent in enumerate(val_sents):
-            preds = y_pred[sent_idx]
-            for (token, _), pred_tag in zip(sent, preds):
-                f.write(f"{token} {pred_tag}\n")
-            f.write("\n")
+    write_predictions_like_input(val_path, output_path, y_pred)
     print(f"[{language}] Predictions written to {output_path}")
 
     metrics = evaluate(language, val_sents, y_pred)
@@ -379,12 +376,7 @@ def evaluate(language, val_sents, y_pred):
 def predict_test(model, language, test_path, output_path):
     test_sents = load_data(test_path)
     y_pred = model.predict(test_sents)
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for sent_idx, sent in enumerate(test_sents):
-            preds = y_pred[sent_idx]
-            for (token, _), pred_tag in zip(sent, preds):
-                f.write(f"{token} {pred_tag}\n")
-            f.write("\n")
+    write_predictions_like_input(test_path, output_path, y_pred)
     print(f"[{language}] Test predictions written to {output_path}")
 
 

@@ -20,6 +20,8 @@ import os
 import sys
 from collections import defaultdict
 
+from io_utils import write_predictions_like_input
+
 
 # ------------------------------------------------------------
 # BIO / BMES legal-transition helpers (inlined to avoid pulling in PyTorch
@@ -191,11 +193,17 @@ def ensemble(language, model_files, model_labels, weights, val_path, output_path
         path = viterbi_constrained(emissions, tags, language)
         out_sents.append(list(zip(tokens, path)))
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for sent in out_sents:
-            for tok, tag in sent:
-                f.write(f"{tok} {tag}\n")
-            f.write("\n")
+    if val_path and os.path.exists(val_path):
+        write_predictions_like_input(
+            val_path, output_path, [[tag for _, tag in sent] for sent in out_sents]
+        )
+    else:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            for sent_idx, sent in enumerate(out_sents):
+                if sent_idx > 0:
+                    f.write("\n")
+                for tok, tag in sent:
+                    f.write(f"{tok} {tag}\n")
     print(f"[{language}] Ensemble predictions written to {output_path}")
 
     if val_path and os.path.exists(val_path):

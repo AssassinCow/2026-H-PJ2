@@ -53,9 +53,7 @@
 - 英文最高分来自三模型融合 Ensemble `0.9065`，单模型最优 CRF `0.9048` 紧随其后；增强后的 Transformer+CRF（接入 GloVe-300d 后）`0.8944`。
 - 中文最高分首次由单模型 Transformer+CRF 取得 `0.9531`（拼接 fastText 单字向量），与 Ensemble `0.9530` 几乎贴着，CRF `0.9519`。
 
-测试集上偏置切换：Transformer+CRF 在英文反超（F1 `0.8464`），CRF 在中文称王（F1 `0.9558`）。预训练向量贡献由 ablation 单独量化（详见 [NER/README.md](NER/README.md) 的"Ablation：关闭预训练词向量"小节）。
-
-提交策略：英文优先 Ensemble；中文优先 Transformer+CRF（也可直接选 Ensemble，差距约 `0.0001`）。若要求单模型一致提交，CRF 在两个语言上都是稳健次选。完整实验表（含测试集与 ablation）和优化说明见 [NER/README.md](NER/README.md)。
+提交策略：英文优先 Ensemble；中文优先 Transformer+CRF（也可直接选 Ensemble，差距约 `0.0001`）。若要求单模型一致提交，CRF 在两个语言上都是稳健次选。完整验证集实验表、ablation 和优化说明见 [NER/README.md](NER/README.md)。
 
 ## 数据格式
 
